@@ -1,0 +1,476 @@
+admin.php
+
+?php
+include 'db.php';
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') { header("Location: login.php"); exit(); }
+$msg = "";
+
+// 1. Add Student (সব তথ্য সহকারে স্টুডেন্ট রেজিস্টার)
+if (isset($_POST['add_student'])) {
+    $sname = trim($_POST['student_name']); 
+    $roll = trim($_POST['roll']); 
+    $phone = trim($_POST['phone']); 
+    $parent_name = trim($_POST['parent_name']); 
+    $class_id = $_POST['class_id'];
+    
+    // ডুপ্লিকেট রোল চেক
+    $check_roll = $conn->prepare("SELECT roll FROM students WHERE roll = ?");
+    $check_roll->bind_param("s", $roll);
+    $check_roll->execute();
+    $check_roll->store_result();
+    
+    if($check_roll->num_rows > 0) {
+        $msg = "Error: Roll Number already exists!";
+    } else {
+        // ডাটাবেজে সব ইনফো সহ ইনসার্ট করা
+        $q = "INSERT INTO students (student_name, roll, phone, parent_name, class_id) VALUES (?, ?, ?, ?, ?)";
+        $st = $conn->prepare($q); 
+        $st->bind_param("ssssi", $sname, $roll, $phone, $parent_name, $class_id);
+        if($st->execute()) {
+            $msg = "Student Registered Successfully with all details!";
+        } else {
+            $msg = "Error creating student.";
+        }
+    }
+}
+
+// 2. Class Subject Mapping (কোন ক্লাসে কোন সাবজেক্ট থাকবে)
+if (isset($_POST['map_subject'])) {
+    $class_id = $_POST['class_id']; $subject_id = $_POST['subject_id'];
+    $q = "INSERT INTO class_subjects (class_id, subject_id) VALUES (?, ?)";
+    $st = $conn->prepare($q); $st->bind_param("ii", $class_id, $subject_id);
+    if($st->execute()) $msg = "Subject mapped to Class successfully!";
+}
+
+// 3. Assign Teacher to Class Subject (কোন টিচার কোন ক্লাস-সাবজেক্ট নিবেন)
+if (isset($_POST['assign_teacher'])) {
+    $teacher_id = $_POST['teacher_id']; $class_subject_id = $_POST['class_subject_id'];
+    $q = "INSERT INTO teacher_assignment (teacher_id, class_subject_id) VALUES (?, ?)";
+    $st = $conn->prepare($q); $st->bind_param("ii", $teacher_id, $class_subject_id);
+    if($st->execute()) $msg = "Teacher assigned successfully!";
+}
+
+// 4. Add Notice
+if (isset($_POST['add_notice'])) {
+    $title = $_POST['title']; $desc = $_POST['description']; $date = date('Y-m-d');
+    $q = "INSERT INTO notices (title, description, publish_date) VALUES (?, ?, ?)";
+    $st = $conn->prepare($q); $st->bind_param("sss", $title, $desc, $date);
+    if($st->execute()) $msg = "Notice Published!";
+}
+?>
+
+
+db.php
+<?php
+$host = "localhost";
+$user = "root";
+$pass = "";
+$dbname = "student_grade_tracking_system";
+
+$conn = new mysqli($host, $user, $pass, $dbname);
+
+if ($conn->connect_error) {
+    die("Connection failed: " . $conn->connect_error);
+}
+
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+?>
+
+
+login.php
+<?php
+session_start(); 
+
+include 'db.php';
+$error = "";
+
+if ($_SERVER["REQUEST_METHOD"] == "POST") {
+    $username = trim($_POST['username']);
+    $password = trim($_POST['password']);
+    
+    // ইউজার ড্রপডাউন থেকে কী সিলেক্ট করেছে তা নেওয়া হচ্ছে
+    if (isset($_POST['role'])) {
+        $selected_role = $_POST['role'];
+    } else {
+        $selected_role = "";
+    }
+
+    // সব তথ্য ডাটাবেজের সাথে মিলিয়ে দেখা হচ্ছে
+    $sql = "SELECT * FROM users WHERE username = ? AND password = ? AND role = ? AND status = 'approved'";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("sss", $username, $password, $selected_role);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    if ($result->num_rows == 1) {
+        $user = $result->fetch_assoc();
+        
+        $_SESSION['user_id'] = $user['user_id'];
+        $_SESSION['role'] = $user['role'];
+        $_SESSION['username'] = $user['username'];
+
+        if ($selected_role == 'admin') {
+            header("Location: admin.php");
+            exit();
+        } elseif ($selected_role == 'teacher') {
+            header("Location: teacher.php");
+            exit();
+        } elseif ($selected_role == 'parent') {
+            header("Location: parent.php");
+            exit();
+        }
+    } else {
+        $error = "Incorrect information provided! Please select the correct username, password, and user type.";
+    }
+}
+?>
+
+
+logout.php
+
+<?php
+session_start();
+session_destroy();
+header("Location: login.php");
+exit();
+?>
+
+
+
+parent.php
+<?php
+include 'db.php';
+
+// সেশন চেক করা
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'parent') { 
+    header("Location: login.php"); 
+    exit(); 
+}
+
+$uid = $_SESSION['user_id'];
+
+// ১. লগইন করা অভিভাবকের parent_id বের করা
+$parent_res = $conn->query("SELECT parent_id FROM parents WHERE user_id = $uid");
+$parent_data = $parent_res->fetch_assoc();
+$parent_id = $parent_data['parent_id'] ?? 0;
+
+// ২. অভিভাবকের সন্তানের প্রোফাইল ডাটা আনা
+$stud_q = $conn->query("SELECT s.*, c.class_name FROM students s JOIN classes c ON s.class_id = c.class_id WHERE s.parent_id = $parent_id");
+$student = $stud_q->fetch_assoc();
+$student_id = $student['student_id'] ?? 0;
+
+$report_card = [];
+
+if($student_id > 0) {
+    // সন্তানের ক্লাসের সব সাবজেক্টের লিস্ট আনা
+    $subjects_q = $conn->query("SELECT cs.class_subject_id, sub.subject_name, ta.assignment_id 
+                                FROM class_subjects cs 
+                                JOIN subjects sub ON cs.subject_id = sub.subject_id
+                                JOIN teacher_assignment ta ON cs.class_subject_id = ta.class_subject_id
+                                WHERE cs.class_id = {$student['class_id']}");
+    
+    while($sub = $subjects_q->fetch_assoc()) {
+        $asg_id = $sub['assignment_id'];
+        
+        // ক) সব কাস্টম অ্যাসেসমেন্টের প্রাপ্ত নম্বরের সরাসরি যোগফল (Direct Sum)
+        $assess_res = $conn->query("SELECT SUM(sm.marks_obtained) as obtained 
+                                    FROM student_marks sm 
+                                    JOIN exam_configurations ec ON sm.exam_config_id = ec.exam_config_id 
+                                    WHERE sm.student_id = $student_id AND ec.assignment_id = $asg_id AND ec.exam_type = 'assessment'");
+        $assess_data = $assess_res->fetch_assoc();
+        $final_assessment_mark = $assess_data['obtained'] ?? 0;
+        
+        // খ) ফাইনাল পরীক্ষার মার্কস বের করা (৭০ এর মধ্যে)
+        $final_res = $conn->query("SELECT sm.marks_obtained as fnm FROM student_marks sm 
+                                   JOIN exam_configurations ec ON sm.exam_config_id = ec.exam_config_id 
+                                   WHERE sm.student_id = $student_id AND ec.assignment_id = $asg_id AND ec.exam_type = 'final'");
+        $final_data = $final_res->fetch_assoc();
+        $final_mark = ($final_data !== null) ? $final_data['fnm'] : null;
+        
+        // গ) মোট নম্বর (অ্যাসেসমেন্টের যোগফল + ফাইনাল মার্ক)
+        $total_mark = ($final_mark !== null) ? ($final_assessment_mark + $final_mark) : $final_assessment_mark;
+        $total_mark = round($total_mark, 2);
+        
+        // ঘ) লেটার গ্রেড ক্যালকুলেশন
+        $grade = "Incomplete";
+        if($final_mark !== null) {
+            if($total_mark >= 80) $grade = "A+";
+            elseif($total_mark >= 70) $grade = "A";
+            elseif($total_mark >= 60) $grade = "A-";
+            elseif($total_mark >= 50) $grade = "B";
+            elseif($total_mark >= 40) $grade = "C";
+            else $grade = "F";
+        }
+        
+        $report_card[] = [
+            'subject' => $sub['subject_name'],
+            'assessment' => $final_assessment_mark,
+            'final' => ($final_mark !== null) ? $final_mark : 'Not Published',
+            'total' => $total_mark,
+            'grade' => $grade
+        ];
+    }
+}
+
+// ৩. উপস্থিতি বা অ্যাটেনডেন্স কাউন্ট
+$att_data = $conn->query("SELECT COUNT(*) as total, SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) as present FROM attendance WHERE student_id = $student_id")->fetch_assoc();
+$total_days = $att_data['total'] ?? 0; 
+$present_days = $att_data['present'] ?? 0;
+$att_percentage = $total_days > 0 ? round(($present_days / $total_days) * 100, 2) : 0;
+?>
+
+
+
+register_parent.php
+<?php
+include 'db.php';
+$msg = ""; $msg_class = "";
+
+if ($_SERVER["REQUEST_METHOD"] == "POST") {
+    $username     = trim($_POST['username']);
+    $password     = trim($_POST['password']); 
+    $parent_name  = trim($_POST['parent_name']);
+    $email        = trim($_POST['email']);
+    $phone        = trim($_POST['phone']);
+    $student_roll = trim($_POST['student_roll']);
+
+    // ১. স্টুডেন্ট রোল ডাটাবেজে আছে কিনা চেক করা
+    $check_student = $conn->prepare("SELECT student_id FROM students WHERE roll = ?");
+    $check_student->bind_param("s", $student_roll);
+    $check_student->execute();
+    $res_student = $check_student->get_result();
+
+    if ($res_student->num_rows == 0) {
+        $msg = "Student Roll Number not found! Contact Admin."; $msg_class = "error";
+    } else {
+        $student_data = $res_student->fetch_assoc();
+        $student_id = $student_data['student_id'];
+
+        // ২. ইউজারনেম ডুপ্লিকেট চেক
+        $check_user = $conn->prepare("SELECT username FROM users WHERE username = ?");
+        $check_user->bind_param("s", $username);
+        $check_user->execute();
+        $check_user->store_result();
+
+        if ($check_user->num_rows > 0) {
+            $msg = "Username already exists!"; $msg_class = "error";
+        } else {
+            // ৩. অ্যাকাউন্ট তৈরি করা
+            $sql_user = "INSERT INTO users (username, password, role, status) VALUES (?, ?, 'parent', 'approved')";
+            $stmt_user = $conn->prepare($sql_user);
+            $stmt_user->bind_param("ss", $username, $password);
+
+            if ($stmt_user->execute()) {
+                $user_id = $conn->insert_id;
+                
+                // ৪. parents টেবিলে ডাটা ইনসার্ট
+                $sql_parent = "INSERT INTO parents (user_id, parent_name, email, phone) VALUES (?, ?, ?, ?)";
+                $stmt_parent = $conn->prepare($sql_parent);
+                $stmt_parent->bind_param("isss", $user_id, $parent_name, $email, $phone);
+                $stmt_parent->execute();
+                $parent_id = $conn->insert_id;
+
+                // ৫. students টেবিলে parent_id আপডেট করে লিংক করে দেওয়া
+                $update_student = $conn->prepare("UPDATE students SET parent_id = ? WHERE student_id = ?");
+                $update_student->bind_param("ii", $parent_id, $student_id);
+                $update_student->execute();
+
+                $msg = "Parent Registered successfully! <a href='login.php'>Login Here</a>"; $msg_class = "success";
+            }
+        }
+    }
+}
+?>
+
+
+register_teacher.php
+
+<?php
+include 'db.php';
+$msg = ""; $msg_class = "";
+
+if ($_SERVER["REQUEST_METHOD"] == "POST") {
+    $username   = trim($_POST['username']);
+    $password   = trim($_POST['password']); 
+    $full_name  = trim($_POST['full_name']);
+    $email      = trim($_POST['email']);
+    $phone      = trim($_POST['phone']);
+
+    $check_user = $conn->prepare("SELECT username FROM users WHERE username = ?");
+    $check_user->bind_param("s", $username);
+    $check_user->execute();
+    $check_user->store_result();
+
+    if ($check_user->num_rows > 0) {
+        $msg = "Username already exists!"; $msg_class = "error";
+    } else {
+        $sql_user = "INSERT INTO users (username, password, role, status) VALUES (?, ?, 'teacher', 'approved')";
+        $stmt_user = $conn->prepare($sql_user);
+        $stmt_user->bind_param("ss", $username, $password);
+
+        if ($stmt_user->execute()) {
+            $user_id = $conn->insert_id;
+            $sql_teacher = "INSERT INTO teachers (user_id, teacher_name, email, phone) VALUES (?, ?, ?, ?)";
+            $stmt_teacher = $conn->prepare($sql_teacher);
+            $stmt_teacher->bind_param("isss", $user_id, $full_name, $email, $phone);
+            $stmt_teacher->execute();
+            $msg = "Teacher Registered successfully! <a href='login.php'>Login Here</a>"; $msg_class = "success";
+        } else {
+            $msg = "Error occurred!"; $msg_class = "error";
+        }
+    }
+}
+?>
+
+teacher_action.php
+
+<?php
+include 'db.php';
+
+// সেশন ভ্যালিডেশন
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'teacher') { 
+    header("Location: login.php"); 
+    exit(); 
+}
+
+$assignment_id = $_GET['assignment_id'] ?? 0;
+
+// ক্লাস ও সাবজেক্টের ডাটা কুয়েরি
+$info_q = "SELECT c.class_id, c.class_name, s.subject_name FROM teacher_assignment ta 
+           JOIN class_subjects cs ON ta.class_subject_id = cs.class_subject_id
+           JOIN classes c ON cs.class_id = c.class_id 
+           JOIN subjects s ON cs.subject_id = s.subject_id 
+           WHERE ta.assignment_id = ?";
+$stmt_info = $conn->prepare($info_q); 
+$stmt_info->bind_param("i", $assignment_id); 
+$stmt_info->execute();
+$info_res = $stmt_info->get_result()->fetch_assoc();
+
+if (!$info_res) { 
+    die("Invalid Access or Assignment Not Found!"); 
+}
+
+$class_id = $info_res['class_id']; 
+$class_name = $info_res['class_name']; 
+$subject_name = $info_res['subject_name'];
+$msg = ""; 
+$msg_type = "";
+
+// সিস্টেমে এই সাবজেক্টের জন্য 'Final Exam' (70 Marks) না থাকলে তা অটোমেটিক ব্যাকএন্ডে তৈরি করার লজিক
+$check_final = $conn->query("SELECT exam_config_id FROM exam_configurations WHERE assignment_id = $assignment_id AND exam_type = 'final'");
+if($check_final->num_rows == 0) {
+    $conn->query("INSERT INTO exam_configurations (assignment_id, exam_title, exam_type, total_marks) VALUES ($assignment_id, 'Final Exam', 'final', 70)");
+}
+
+// বর্তমানে এই সাবজেক্টে মোট কত মার্কের Assessment তৈরি করা হয়েছে তা হিসাব করা
+$total_allocated_res = $conn->query("SELECT SUM(total_marks) as total_allocated FROM exam_configurations WHERE assignment_id = $assignment_id AND exam_type = 'assessment'");
+$total_allocated_row = $total_allocated_res->fetch_assoc();
+$current_assessment_total = $total_allocated_row['total_allocated'] ?? 0;
+$remaining_marks = 30 - $current_assessment_total; // সর্বোচ্চ ৩০ থেকে বাকি কত আছে
+
+// ১. দৈনিক উপস্থিতি (Attendance) সেভ করার লজিক
+if (isset($_POST['save_attendance'])) {
+    $attendance_date = $_POST['attendance_date'];
+    $present_students = $_POST['attendance'] ?? [];
+    $all_stud_res = $conn->query("SELECT student_id FROM students WHERE class_id = $class_id");
+    while ($st = $all_stud_res->fetch_assoc()) {
+        $sid = $st['student_id'];
+        $status = in_array($sid, $present_students) ? 'Present' : 'Absent';
+        $conn->query("INSERT INTO attendance (student_id, assignment_id, attendance_date, status) VALUES ($sid, $assignment_id, '$attendance_date', '$status') ON DUPLICATE KEY UPDATE status = '$status'");
+    }
+    $msg = "Attendance updated successfully!"; 
+    $msg_type = "success";
+}
+
+// ২. ডাইনামিক অ্যাসেসমেন্ট তৈরি (নাম ও মার্ক শিক্ষক দেবেন, কিন্তু ৩০ এর বেশি হতে পারবে না)
+if (isset($_POST['create_assessment'])) {
+    $exam_title = trim($_POST['exam_title']);
+    $input_marks = floatval($_POST['total_marks']);
+    
+    if ($input_marks <= 0) {
+        $msg = "Error! Exam marks must be greater than 0.";
+        $msg_type = "danger";
+    }
+    // মূল লজিক চেক: নতুন মার্ক যোগ করলে ৩০ এর বেশি হয়ে যাচ্ছে কিনা
+    else if (($current_assessment_total + $input_marks) > 30) {
+        $msg = "Error! Total Assessment marks cannot exceed 30. You have already used $current_assessment_total Marks. Maximum allowed for this new assessment is $remaining_marks Marks.";
+        $msg_type = "danger";
+    } else {
+        // ডুপ্লিকেট নাম চেক
+        $check_dup = $conn->prepare("SELECT exam_config_id FROM exam_configurations WHERE assignment_id = ? AND exam_title = ?");
+        $check_dup->bind_param("is", $assignment_id, $exam_title);
+        $check_dup->execute();
+        
+        if($check_dup->get_result()->num_rows > 0) {
+            $msg = "An assessment with this name already exists for this subject!";
+            $msg_type = "danger";
+        } else {
+            // শিক্ষক দ্বারা নির্ধারিত মার্ক দিয়ে ডাটাবেজে এন্ট্রি
+            $ins = $conn->prepare("INSERT INTO exam_configurations (assignment_id, exam_title, exam_type, total_marks) VALUES (?, ?, 'assessment', ?)");
+            $ins->bind_param("isd", $assignment_id, $exam_title, $input_marks);
+            if($ins->execute()) {
+                header("Location: teacher_action.php?assignment_id=$assignment_id&active_exam=" . $conn->insert_id . "&msg=created"); 
+                exit();
+            }
+        }
+    }
+}
+
+if(isset($_GET['msg']) && $_GET['msg'] == 'created') {
+    $msg = "New Assessment created successfully!";
+    $msg_type = "success";
+}
+
+// ৩. শিক্ষার্থীদের পরীক্ষার মার্কস ইনপুট বা আপডেট করার লজিক
+if (isset($_POST['save_marks'])) {
+    $exam_config_id = $_POST['exam_config_id'];
+    $max_limit = $_POST['max_marks'];
+    $student_marks = $_POST['marks'] ?? [];
+    
+    $error_flag = false;
+    foreach ($student_marks as $sid => $mark) {
+        if ($mark !== "") {
+            if($mark > $max_limit) {
+                $error_flag = true;
+                break;
+            }
+        }
+    }
+    
+    if($error_flag) {
+        $msg = "Error! Marks obtained cannot be greater than maximum exam marks ($max_limit).";
+        $msg_type = "danger";
+    } else {
+        foreach ($student_marks as $sid => $mark) {
+            if ($mark !== "") {
+                $conn->query("INSERT INTO student_marks (student_id, exam_config_id, marks_obtained) VALUES ($sid, $exam_config_id, $mark) ON DUPLICATE KEY UPDATE marks_obtained = $mark");
+            }
+        }
+        $msg = "Student marks successfully updated!"; 
+        $msg_type = "success";
+    }
+}
+
+$selected_date = $_GET['attendance_date'] ?? date('Y-m-d');
+$active_exam = $_GET['active_exam'] ?? 0;
+
+// ডাটা রি-লোডের পর রিমেইনিং মার্কস আপডেট করা
+$total_allocated_res = $conn->query("SELECT SUM(total_marks) as total_allocated FROM exam_configurations WHERE assignment_id = $assignment_id AND exam_type = 'assessment'");
+$current_assessment_total = $total_allocated_res->fetch_assoc()['total_allocated'] ?? 0;
+$remaining_marks = 30 - $current_assessment_total;
+?>
+
+teacher.php
+<?php
+include 'db.php';
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'teacher') { header("Location: login.php"); exit(); }
+
+$uid = $_SESSION['user_id'];
+// লগইন করা ইউজারের teacher_id বের করা
+$t_res = $conn->query("SELECT teacher_id, teacher_name FROM teachers WHERE user_id = $uid");
+$t_data = $t_res->fetch_assoc();
+$teacher_id = $t_data['teacher_id'] ?? 0;
+$teacher_name = $t_data['teacher_name'] ?? 'Teacher';
+?>
